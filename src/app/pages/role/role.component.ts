@@ -9,6 +9,8 @@ import { AsyncPipe } from '@angular/common';
 import { MatSelectModule } from '@angular/material/select';
 import { MatInputModule } from '@angular/material/input';
 import { AuthService } from '../../services/auth.service';
+import { catchError, of } from 'rxjs';
+import { Role } from '../../interfaces/role';
 
 @Component({
   selector: 'app-role',
@@ -29,17 +31,33 @@ export class RoleComponent {
   authService = inject(AuthService);
   errorMessage = '';
   role: RoleCreateRequest = {} as RoleCreateRequest;
-  roles$ = this.roleService.getRoles();
-  users$ = this.authService.getAll();
   selectedUser: string = '';
   selectedRole: string = '';
-
   snackBar = inject(MatSnackBar);
+
+  // Roles predefinidos como fallback
+  defaultRoles: Role[] = [
+    { id: '1', name: 'User', totalUsers: 0 },
+    { id: '2', name: 'Admin', totalUsers: 0 },
+    { id: '3', name: 'Manager', totalUsers: 0 }
+  ];
+
+  roles$ = this.roleService.getRoles().pipe(
+    catchError(error => {
+      console.log('Error loading roles from server, using default roles:', error);
+      this.snackBar.open('Using default roles (server error)', 'Close', {
+        duration: 3000,
+      });
+      return of(this.defaultRoles);
+    })
+  );
+
+  users$ = this.authService.getAll();
 
   createRole(role: RoleCreateRequest) {
     this.roleService.createRole(role).subscribe({
       next: (response: { message: string }) => {
-        this.roles$ = this.roleService.getRoles();
+        this.refreshRoles();
         this.snackBar.open('Role Created Successfully', 'Ok', {
           duration: 3000,
         });
@@ -50,6 +68,15 @@ export class RoleComponent {
         }
       },
     });
+  }
+
+  refreshRoles() {
+    this.roles$ = this.roleService.getRoles().pipe(
+      catchError(error => {
+        console.log('Error refreshing roles, using default roles:', error);
+        return of(this.defaultRoles);
+      })
+    );
   }
 
   deleteRole(id: string) {
@@ -73,7 +100,7 @@ export class RoleComponent {
       .assignRole(this.selectedUser, this.selectedRole)
       .subscribe({
         next: (response) => {
-          this.roles$ = this.roleService.getRoles();
+          this.refreshRoles();
           this.snackBar.open('Role Assign Successfully', 'Close', {
             duration: 3000,
           });

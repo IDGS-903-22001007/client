@@ -1,80 +1,85 @@
-import { HttpErrorResponse, HttpInterceptorFn } from '@angular/common/http';
+import { HttpErrorResponse, HttpInterceptorFn, HttpRequest } from '@angular/common/http';
 import { inject } from '@angular/core';
 import { AuthService } from '../services/auth.service';
-import { catchError, throwError } from 'rxjs';
+import { catchError, switchMap, throwError } from 'rxjs';
 import { Router } from '@angular/router';
+import { of } from 'rxjs';
 
 export const tokenInterceptor: HttpInterceptorFn = (req, next) => {
   const authService = inject(AuthService);
   const router = inject(Router);
 
-  // Rutas que NO necesitan token de autorización
+  // Rutas públicas
   const publicRoutes = [
     '/account/login',
     '/account/register',
     '/account/forgot-password',
     '/account/reset-password',
-    '/account/refresh-token',
-    '/api/roles'
+    '/account/refresh-token'
   ];
 
-  // Verificar si la URL actual es una ruta pública
   const isPublicRoute = publicRoutes.some(route => req.url.includes(route));
+  const isRolesRequest = req.url.includes('/api/roles');
+  const hasToken = !!authService.getToken();
 
   console.log('Request URL:', req.url);
   console.log('Is public route:', isPublicRoute);
-  console.log('Token:', authService.getToken());
+  console.log('Is roles request:', isRolesRequest);
+  console.log('Has token:', hasToken);
 
-  // Si es ruta pública, enviar sin token
-  if (isPublicRoute) {
-    console.log('Sending request without token (public route)');
-    return next(req);
-  }
+  // Si es pública, no se clona con token
+  if (isPublicRoute) return next(req);
 
-  // Si no es ruta pública pero no hay token, continuar sin token
-  if (!authService.getToken()) {
-    console.log('No token available for private route');
-    return next(req);
-  }
+  // Para roles sin token, continuar sin token
+  if (isRolesRequest && !hasToken) return next(req);
 
-  // Agregar token para rutas privadas
-  const cloned = req.clone({
-    headers: req.headers.set(
-      'Authorization',
-      'Bearer ' + authService.getToken()
-    ),
+  // Si no hay token para ruta privada, continuar sin token
+  if (!hasToken) return next(req);
+
+  // Si hay token, agregarlo
+  const clonedReq = req.clone({
+    headers: req.headers.set('Authorization', 'Bearer ' + authService.getToken()),
   });
 
-  console.log('Sending request with token');
-
-  return next(cloned).pipe(
+  return next(clonedReq).pipe(
     catchError((err: HttpErrorResponse) => {
       if (err.status === 401) {
-        console.log('401 error, attempting token refresh');
-        authService
-          .refreshToken({
-            email: authService.getUserDetail()?.email,
-            token: authService.getToken() || '',
-            refreshToken: authService.getRefreshToken() || '',
-          })
-          .subscribe({
-            next: (response) => {
-              if (response.isSuccess) {
-                localStorage.setItem('user', JSON.stringify(response));
-                const cloned = req.clone({
-                  setHeaders: {
-                    Authorization: `Bearer ${response.token}`,
-                  },
-                });
-                location.reload();
-              }
-            },
-            error: () => {
+        console.log('401 detectado: intentando refresh de token...');
+
+        const email = authService.getUserDetail()?.email;
+        const token = authService.getToken();
+        const refreshToken = authService.getRefreshToken();
+
+        if (!email || !token || !refreshToken) {
+          authService.logout();
+          router.navigate(['/login']);
+          return throwError(() => err);
+        }
+
+        return authService.refreshToken({ email, token, refreshToken }).pipe(
+          switchMap((response) => {
+            if (response.isSuccess) {
+              localStorage.setItem('user', JSON.stringify(response));
+              const retryReq = req.clone({
+                setHeaders: {
+                  Authorization: `Bearer ${response.token}`,
+                },
+              });
+              return next(retryReq);
+            } else {
               authService.logout();
               router.navigate(['/login']);
-            },
-          });
+              return throwError(() => err);
+            }
+          }),
+          catchError(() => {
+            authService.logout();
+            router.navigate(['/login']);
+            return throwError(() => err);
+          })
+        );
       }
+
       return throwError(() => err);
     })
   );
